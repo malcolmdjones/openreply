@@ -1,67 +1,105 @@
-import NextAuth, { type NextAuthConfig } from "next-auth";
-import Nodemailer from "next-auth/providers/nodemailer";
-import Resend from "next-auth/providers/resend";
-import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/db/client";
-import { ensureWorkspaceForUser, getPrimaryWorkspace } from "@/lib/workspace";
 import { isEmailAllowedToSignIn } from "@/lib/env";
+import { createClient } from "@/lib/supabase/server";
+import { ensureWorkspaceForUser, getPrimaryWorkspace } from "@/lib/workspace";
+import type { User as PrismaUser } from "@/app/generated/prisma/client";
+import type { User as SupabaseUser } from "@supabase/supabase-js";
 
-type AdapterPrismaClient = Parameters<typeof PrismaAdapter>[0];
+export type AppSession = {
+  user: {
+    id: string;
+    email: string | null;
+    name?: string | null;
+    image?: string | null;
+  };
+};
 
-const emailFrom = process.env.EMAIL_FROM ?? "OpenReply <login@example.com>";
-// Setting EMAIL_SERVER switches magic links to your own SMTP server, for
-// self-hosters who do not want a third-party mail service. Resend stays the
-// default, so an existing deployment is unaffected.
-const smtpServer = process.env.EMAIL_SERVER;
+function displayNameFromSupabase(user: SupabaseUser): string | null {
+  const meta = user.user_metadata ?? {};
+  return (
+    (typeof meta.full_name === "string" && meta.full_name) ||
+    (typeof meta.name === "string" && meta.name) ||
+    null
+  );
+}
+
+function avatarFromSupabase(user: SupabaseUser): string | null {
+  const meta = user.user_metadata ?? {};
+  return (
+    (typeof meta.avatar_url === "string" && meta.avatar_url) ||
+    (typeof meta.picture === "string" && meta.picture) ||
+    null
+  );
+}
 
 /**
- * Provider id the login form has to sign in with. It differs per transport,
- * so it is derived here rather than hardcoded at the call site.
+ * Map a Supabase Auth user onto the Prisma User row (find/upsert by email)
+ * so existing workspaces and Instagram campaigns keep working.
  */
-export const EMAIL_PROVIDER_ID = smtpServer ? "nodemailer" : "resend";
+export async function ensurePrismaUserForAuthUser(
+  supabaseUser: SupabaseUser
+): Promise<PrismaUser | null> {
+  const email = supabaseUser.email?.trim().toLowerCase();
+  if (!email) return null;
 
-export const authConfig = {
-  adapter: PrismaAdapter(prisma as unknown as AdapterPrismaClient),
-  providers: [
-    smtpServer
-      ? Nodemailer({ server: smtpServer, from: emailFrom })
-      : Resend({
-          apiKey: process.env.RESEND_API_KEY ?? "missing-resend-api-key",
-          from: emailFrom,
-        }),
-  ],
-  callbacks: {
-    // Runs before the magic link is sent, so a blocked address never receives
-    // one, and again when the link is verified.
-    async signIn({ user }) {
-      return isEmailAllowedToSignIn(user?.email);
-    },
-    async session({ session, user }) {
-      if (session.user) {
-        session.user.id = user.id;
-      }
-      return session;
-    },
-  },
-  events: {
-    async createUser({ user }) {
-      if (user.id) {
-        await ensureWorkspaceForUser(user.id, user.email);
-      }
-    },
-  },
-  pages: {
-    signIn: "/login",
-    verifyRequest: "/verify-request",
-  },
-  session: {
-    strategy: "database",
-  },
-  trustHost: true,
-  secret: process.env.NEXTAUTH_SECRET,
-} satisfies NextAuthConfig;
+  const name = displayNameFromSupabase(supabaseUser);
+  const image = avatarFromSupabase(supabaseUser);
 
-export const { handlers, auth, signIn, signOut } = NextAuth(authConfig);
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing) {
+    const needsUpdate =
+      (name && existing.name !== name) || (image && existing.image !== image);
+    if (!needsUpdate) return existing;
+
+    return prisma.user.update({
+      where: { id: existing.id },
+      data: {
+        ...(name ? { name } : {}),
+        ...(image ? { image } : {}),
+      },
+    });
+  }
+
+  return prisma.user.create({
+    data: {
+      email,
+      name,
+      image,
+      emailVerified: new Date(),
+    },
+  });
+}
+
+export async function auth(): Promise<AppSession | null> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user?.email) return null;
+
+  if (!isEmailAllowedToSignIn(user.email)) {
+    await supabase.auth.signOut();
+    return null;
+  }
+
+  const prismaUser = await ensurePrismaUserForAuthUser(user);
+  if (!prismaUser) return null;
+
+  return {
+    user: {
+      id: prismaUser.id,
+      email: prismaUser.email,
+      name: prismaUser.name,
+      image: prismaUser.image,
+    },
+  };
+}
+
+export async function signOut() {
+  const supabase = await createClient();
+  await supabase.auth.signOut();
+}
 
 export async function getCurrentUserId(): Promise<string | null> {
   const session = await auth();

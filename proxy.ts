@@ -1,35 +1,51 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { updateSession } from "@/lib/supabase/middleware";
 
-const PROTECTED_PREFIXES = ["/dashboard", "/automations", "/logs", "/settings"];
+const PROTECTED_PREFIXES = [
+  "/dashboard",
+  "/automations",
+  "/logs",
+  "/settings",
+  "/overview",
+  "/inbox",
+  "/campaigns",
+  "/diagnostics",
+];
 
-function hasSessionCookie(request: NextRequest): boolean {
-  return (
-    request.cookies.has("authjs.session-token") ||
-    request.cookies.has("__Secure-authjs.session-token") ||
-    request.cookies.has("next-auth.session-token") ||
-    request.cookies.has("__Secure-next-auth.session-token")
-  );
+function withSessionCookies(
+  target: NextResponse,
+  sessionResponse: NextResponse
+) {
+  sessionResponse.cookies.getAll().forEach((cookie) => {
+    target.cookies.set(cookie.name, cookie.value);
+  });
+  return target;
 }
 
-export function proxy(request: NextRequest) {
+export async function proxy(request: NextRequest) {
+  const { response, user } = await updateSession(request);
+
   const pathname = request.nextUrl.pathname;
   const isProtected = PROTECTED_PREFIXES.some(
     (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
   );
   const isLogin = pathname === "/login";
-  const isAuthenticated = hasSessionCookie(request);
+  const isAuthenticated = Boolean(user);
 
   if (isProtected && !isAuthenticated) {
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("callbackUrl", pathname);
-    return NextResponse.redirect(loginUrl);
+    return withSessionCookies(NextResponse.redirect(loginUrl), response);
   }
 
   if (isLogin && isAuthenticated) {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
+    return withSessionCookies(
+      NextResponse.redirect(new URL("/dashboard", request.url)),
+      response
+    );
   }
 
-  return NextResponse.next();
+  return response;
 }
 
 export const config = {
@@ -38,6 +54,11 @@ export const config = {
     "/automations/:path*",
     "/logs/:path*",
     "/settings/:path*",
+    "/overview/:path*",
+    "/inbox/:path*",
+    "/campaigns/:path*",
+    "/diagnostics/:path*",
     "/login",
+    "/auth/callback",
   ],
 };
