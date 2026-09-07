@@ -1,9 +1,22 @@
 /**
- * NextAuth.js v5 — Auth Route Handler
+ * Legacy Auth.js / NextAuth route.
  *
- * Uses the shared auth config from lib/auth.ts
+ * Primary login is now Supabase Google OAuth (`/auth/callback`).
+ * This handler is kept so old bookmarks to `/api/auth/*` do not 404;
+ * it redirects to the Google login page.
  */
 
-import { handlers } from "@/lib/auth";
+import { NextResponse } from "next/server";
+import { getBaseUrl } from "@/lib/env";
 
-export const { GET, POST } = handlers;
+function redirectToLogin() {
+  return NextResponse.redirect(new URL("/login", getBaseUrl()));
+}
+
+export async function GET() {
+  return redirectToLogin();
+}
+
+export async function POST() {
+  return redirectToLogin();
+}
