@@ -15,7 +15,9 @@ export function requireEnv(name: string): string {
 }
 
 export function getBaseUrl(): string {
-  return process.env.NEXTAUTH_URL ?? "http://localhost:3000";
+  // Treat empty string as unset — Vercel/env UIs can leave NEXTAUTH_URL=""
+  // which would otherwise yield relative redirects and break Next 16.
+  return process.env.NEXTAUTH_URL || "http://localhost:3000";
 }
 
 export function getEncryptionKeyHex(): string {

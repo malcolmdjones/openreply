@@ -13,23 +13,27 @@ import { canManageWorkspace } from "@/lib/workspace-access";
 
 export const runtime = "nodejs";
 
+function appUrl(path: string, request: NextRequest): string {
+  const base = request.url || getBaseUrl();
+  return new URL(path, base).toString();
+}
+
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
   const error = request.nextUrl.searchParams.get("error");
   const state = verifyOAuthState(request.nextUrl.searchParams.get("state"));
-  const baseUrl = getBaseUrl();
 
   if (error) {
-    return NextResponse.redirect(`${baseUrl}/settings?instagram=denied`);
+    return NextResponse.redirect(appUrl("/settings?instagram=denied", request));
   }
 
   if (!code || !state) {
-    return NextResponse.redirect(`${baseUrl}/settings?instagram=invalid`);
+    return NextResponse.redirect(appUrl("/settings?instagram=invalid", request));
   }
 
   const session = await auth();
   if (!session?.user?.id) {
-    return NextResponse.redirect(`${baseUrl}/login`);
+    return NextResponse.redirect(appUrl("/login", request));
   }
 
   const membership = await prisma.workspaceMember.findFirst({
@@ -40,11 +44,12 @@ export async function GET(request: NextRequest) {
   });
 
   if (!membership || !canManageWorkspace(membership.role)) {
-    return NextResponse.redirect(`${baseUrl}/settings?instagram=forbidden`);
+    return NextResponse.redirect(appUrl("/settings?instagram=forbidden", request));
   }
 
   try {
-    const redirectUri = `${baseUrl}/api/instagram/callback`;
+    // OAuth redirect_uri must match the registered public URL (NEXTAUTH_URL).
+    const redirectUri = `${getBaseUrl()}/api/instagram/callback`;
     const { accessToken: shortLivedToken } = await exchangeCodeForToken(
       code,
       redirectUri
@@ -64,7 +69,7 @@ export async function GET(request: NextRequest) {
 
     if (!connection.allowed) {
       return NextResponse.redirect(
-        `${baseUrl}/settings?instagram=already_connected`
+        appUrl("/settings?instagram=already_connected", request)
       );
     }
 
@@ -106,7 +111,7 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    return NextResponse.redirect(`${baseUrl}/dashboard?connected=true`);
+    return NextResponse.redirect(appUrl("/dashboard?connected=true", request));
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error("[Instagram Callback] Error:", err);
@@ -126,9 +131,12 @@ export async function GET(request: NextRequest) {
       .catch(() => {});
 
     return NextResponse.redirect(
-      `${baseUrl}/settings?instagram=failed&reason=${encodeURIComponent(
-        message.slice(0, 200)
-      )}`
+      appUrl(
+        `/settings?instagram=failed&reason=${encodeURIComponent(
+          message.slice(0, 200)
+        )}`,
+        request
+      )
     );
   }
 }

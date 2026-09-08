@@ -1,18 +1,25 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { canManageWorkspace, getCurrentWorkspaceContext } from "@/lib/workspace-access";
 import { getBaseUrl, getMissingInstagramOAuthEnv } from "@/lib/env";
 import { createOAuthState, getAuthorizationUrl } from "@/lib/meta/oauth";
 
 export const runtime = "nodejs";
 
-export async function GET() {
+function appUrl(path: string, request: NextRequest): string {
+  // Prefer the incoming request origin so redirects stay absolute even when
+  // NEXTAUTH_URL is missing/empty. Fall back to getBaseUrl() for safety.
+  const base = request.url || getBaseUrl();
+  return new URL(path, base).toString();
+}
+
+export async function GET(request: NextRequest) {
   try {
     const context = await getCurrentWorkspaceContext();
     if (!context) {
-      return NextResponse.redirect(`${getBaseUrl()}/login`);
+      return NextResponse.redirect(appUrl("/login", request));
     }
     if (!canManageWorkspace(context.role)) {
-      return NextResponse.redirect(`${getBaseUrl()}/settings?instagram=forbidden`);
+      return NextResponse.redirect(appUrl("/settings?instagram=forbidden", request));
     }
 
     // getAuthorizationUrl and createOAuthState call requireEnv, which throws.
@@ -21,12 +28,16 @@ export async function GET() {
     const missingEnv = getMissingInstagramOAuthEnv();
     if (missingEnv.length > 0) {
       return NextResponse.redirect(
-        `${getBaseUrl()}/settings?instagram=misconfigured&missing=${encodeURIComponent(
-          missingEnv.join(",")
-        )}`
+        appUrl(
+          `/settings?instagram=misconfigured&missing=${encodeURIComponent(
+            missingEnv.join(",")
+          )}`,
+          request
+        )
       );
     }
 
+    // OAuth redirect_uri must match the registered public URL (NEXTAUTH_URL).
     const redirectUri = `${getBaseUrl()}/api/instagram/callback`;
     const state = createOAuthState(context.workspaceId);
 
@@ -34,6 +45,6 @@ export async function GET() {
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error("[Instagram Connect] Error:", message);
-    return NextResponse.redirect(`${getBaseUrl()}/settings?instagram=error`);
+    return NextResponse.redirect(appUrl("/settings?instagram=error", request));
   }
 }
