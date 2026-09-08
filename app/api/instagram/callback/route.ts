@@ -11,6 +11,8 @@ import {
 } from "@/lib/meta/oauth";
 import { canManageWorkspace } from "@/lib/workspace-access";
 
+export const runtime = "nodejs";
+
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
   const error = request.nextUrl.searchParams.get("error");
