@@ -112,6 +112,19 @@ Optional, for tuning the polling reconciler (defaults are fine to start):
 | `COMMENT_POLL_MAX_PER_SWEEP` | `30` | Max new comments each campaign acts on per sweep. Keep it conservative; higher gets closer to Instagram's rate limits. |
 | `COMMENT_POLL_LOOKBACK_HOURS` | `72` | How far back a sweep considers comments. |
 
+Optional, for Redis command budget optimization (see [docs/redis-optimization.md](./redis-optimization.md)):
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `WORKER_HEARTBEAT_INTERVAL_MS` | `300000` | How often the worker writes its health heartbeat (5 min). |
+| `WORKER_HEARTBEAT_TTL_SECONDS` | `720` | How long heartbeat lives in Redis before expiring (12 min). |
+| `BULLMQ_DRAIN_DELAY_MS` | `60000` | How long worker waits when idle before checking for jobs (60s). |
+| `BULLMQ_STALLED_INTERVAL_MS` | `300000` | How often worker checks for stalled jobs (5 min). |
+| `BULLMQ_LOCK_DURATION_MS` | `30000` | How long a job lock lasts before renewal (30s). |
+| `BULLMQ_MAX_STALLED_COUNT` | `2` | Max times a job can be marked stalled before permanent failure. |
+
+These defaults minimize idle Redis commands (~60k/month) for Upstash free tier (500k/month limit). See the Redis optimization doc for the trade-offs.
+
 ## The Meta app
 
 This is the slow part. The code works out of the box; getting Meta to send you comment events is where people lose an afternoon. Every step here exists because skipping it breaks something later. Have your Vercel domain from Step 3 ready, you will paste it in a few times.

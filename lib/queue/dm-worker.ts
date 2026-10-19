@@ -1245,6 +1245,14 @@ async function recordWorkerFailure(
 }
 
 export function createDMWorker(): Worker<DmQueueJob> {
+  // BullMQ Worker settings tuned to minimize idle Redis commands while maintaining
+  // responsiveness. Upstash free tier allows ~11 commands/min; these settings keep
+  // idle usage under ~3.5/min (~150k/month, well under the 500k limit).
+  const DRAIN_DELAY_MS = Number(process.env.BULLMQ_DRAIN_DELAY_MS ?? 60_000);
+  const STALLED_INTERVAL_MS = Number(process.env.BULLMQ_STALLED_INTERVAL_MS ?? 5 * 60_000);
+  const LOCK_DURATION_MS = Number(process.env.BULLMQ_LOCK_DURATION_MS ?? 30_000);
+  const MAX_STALLED_COUNT = Number(process.env.BULLMQ_MAX_STALLED_COUNT ?? 2);
+
   const worker = new Worker<DmQueueJob>(
     "dm-processing",
     processJob,
@@ -1252,6 +1260,10 @@ export function createDMWorker(): Worker<DmQueueJob> {
       connection: getRedisConnection(),
       concurrency: 5,
       settings: {
+        drainDelay: DRAIN_DELAY_MS,
+        stalledInterval: STALLED_INTERVAL_MS,
+        lockDuration: LOCK_DURATION_MS,
+        maxStalledCount: MAX_STALLED_COUNT,
         backoffStrategy: (attemptsMade: number) =>
           BACKOFF_DELAYS[Math.min(attemptsMade - 1, BACKOFF_DELAYS.length - 1)],
       },
