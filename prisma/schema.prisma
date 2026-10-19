@@ -251,6 +251,7 @@ model DmLog {
   @@index([automationId])
   @@index([instagramAccountId])
   @@index([status])
+  @@index([createdAt])
 }
 
 // Legacy reconciliation model; currently unwired. Runtime code does not read
@@ -322,6 +323,7 @@ model WebhookEvent {
 
   @@index([workspaceId])
   @@index([status])
+  @@index([createdAt])
 }
 
 model OperationalEvent {

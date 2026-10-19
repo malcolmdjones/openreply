@@ -63,6 +63,7 @@ while true; do
   # the exact hour does not matter — only that it happens every day.
   if [ "$hour" = "05" ] && [ "$last_daily" != "$today" ]; then
     last_daily="$today"
+    call prune
     call refresh-tokens
     call snapshot-followers
   fi
