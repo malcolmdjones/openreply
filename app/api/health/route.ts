@@ -8,17 +8,106 @@ export const runtime = "nodejs";
 // cached response, or it reports stale worker start times.
 export const dynamic = "force-dynamic";
 
-type CheckStatus = "ok" | "error";
+type CheckStatus = "ok" | "warning" | "error";
 
 interface HealthCheck {
   status: CheckStatus;
   detail?: string;
 }
 
-async function checkDatabase(): Promise<HealthCheck> {
+interface DatabaseHealthCheck extends HealthCheck {
+  size?: {
+    totalMb: number;
+    status: CheckStatus;
+    topRelations?: Array<{ name: string; sizeMb: number }>;
+  };
+}
+
+const DB_SIZE_WARNING_MB = Number(process.env.DB_SIZE_WARNING_MB ?? 350);
+const DB_SIZE_ERROR_MB = Number(process.env.DB_SIZE_ERROR_MB ?? 450);
+const HEALTH_CHECK_TIMEOUT_MS = 5000;
+
+// Track last alert time per status level to avoid spamming OperationalEvents
+const lastAlertTime: Record<string, number> = {};
+
+async function checkDatabase(): Promise<DatabaseHealthCheck> {
   try {
-    await prisma.$queryRaw`SELECT 1`;
-    return { status: "ok" };
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Database check timeout")), HEALTH_CHECK_TIMEOUT_MS)
+    );
+
+    const [, sizeResult] = await Promise.race([
+      Promise.all([
+        prisma.$queryRaw`SELECT 1`,
+        prisma.$queryRaw<[{ db_size_bytes: bigint }]>`
+          SELECT pg_database_size(current_database()) AS db_size_bytes
+        `,
+      ]),
+      timeoutPromise,
+    ]);
+
+    const dbSizeBytes = Number(sizeResult[0].db_size_bytes);
+    const dbSizeMb = Math.round((dbSizeBytes / 1024 / 1024) * 100) / 100;
+
+    let sizeStatus: CheckStatus = "ok";
+    if (dbSizeMb >= DB_SIZE_ERROR_MB) {
+      sizeStatus = "error";
+    } else if (dbSizeMb >= DB_SIZE_WARNING_MB) {
+      sizeStatus = "warning";
+    }
+
+    // Get top 5 relations by size
+    const topRelations = await Promise.race([
+      prisma.$queryRaw<Array<{ name: string; size_bytes: bigint }>>`
+        SELECT
+          relname AS name,
+          pg_total_relation_size(C.oid) AS size_bytes
+        FROM pg_class C
+        LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
+        WHERE nspname = 'public'
+        ORDER BY pg_total_relation_size(C.oid) DESC
+        LIMIT 5
+      `,
+      timeoutPromise,
+    ]);
+
+    const topRelationsMapped = topRelations.map((r) => ({
+      name: r.name,
+      sizeMb: Math.round((Number(r.size_bytes) / 1024 / 1024) * 100) / 100,
+    }));
+
+    // Record OperationalEvent if size is warning or error (at most once per day)
+    if (sizeStatus !== "ok") {
+      const alertKey = `db_size_${sizeStatus}`;
+      const now = Date.now();
+      const lastAlert = lastAlertTime[alertKey] || 0;
+      const dayInMs = 24 * 60 * 60 * 1000;
+
+      if (now - lastAlert > dayInMs) {
+        lastAlertTime[alertKey] = now;
+        await prisma.operationalEvent
+          .create({
+            data: {
+              source: "HEALTH",
+              level: sizeStatus === "error" ? "ERROR" : "WARNING",
+              message: `Database size ${sizeStatus}: ${dbSizeMb} MB (threshold: ${
+                sizeStatus === "error" ? DB_SIZE_ERROR_MB : DB_SIZE_WARNING_MB
+              } MB)`,
+              payload: { dbSizeMb, topRelations: topRelationsMapped },
+            },
+          })
+          .catch(() => {});
+      }
+    }
+
+    return {
+      status: "ok",
+      size: {
+        totalMb: dbSizeMb,
+        status: sizeStatus,
+        topRelations: topRelationsMapped,
+      },
+    };
   } catch (error) {
     return {
       status: "error",
@@ -29,7 +118,15 @@ async function checkDatabase(): Promise<HealthCheck> {
 
 async function checkRedis(): Promise<HealthCheck> {
   try {
-    const pong = await getRedisConnection().ping();
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Redis check timeout")), HEALTH_CHECK_TIMEOUT_MS)
+    );
+
+    const pong = await Promise.race([
+      getRedisConnection().ping(),
+      timeoutPromise,
+    ]);
+
     return { status: pong === "PONG" ? "ok" : "error", detail: pong };
   } catch (error) {
     return {
@@ -41,12 +138,15 @@ async function checkRedis(): Promise<HealthCheck> {
 
 async function checkQueue(): Promise<HealthCheck & { counts?: unknown }> {
   try {
-    const counts = await getDMQueue().getJobCounts(
-      "waiting",
-      "active",
-      "delayed",
-      "failed"
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Queue check timeout")), HEALTH_CHECK_TIMEOUT_MS)
     );
+
+    const counts = await Promise.race([
+      getDMQueue().getJobCounts("waiting", "active", "delayed", "failed"),
+      timeoutPromise,
+    ]);
+
     return { status: "ok", counts };
   } catch (error) {
     return {
@@ -75,9 +175,14 @@ export async function GET() {
     queue.status === "ok" &&
     worker.healthy;
 
+  // Overall status: "ok" if healthy, "degraded" if any check failed but keep 200 on warnings
+  const overallStatus =
+    healthy && database.size?.status === "ok" ? "ok" : "degraded";
+  const httpStatus = database.status === "error" || !healthy ? 503 : 200;
+
   return NextResponse.json(
     {
-      status: healthy ? "ok" : "degraded",
+      status: overallStatus,
       checks: {
         database,
         redis,
@@ -85,6 +190,6 @@ export async function GET() {
         worker,
       },
     },
-    { status: healthy ? 200 : 503 }
+    { status: httpStatus }
   );
 }

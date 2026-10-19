@@ -290,19 +290,47 @@ export async function adMediaFor(postId: string): Promise<string[]> {
   }
 }
 
+// Track last sweep log time per campaign to rate-limit INFO logs
+const lastSweepLogTime = new Map<string, number>();
+const SWEEP_LOG_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+
 async function recordSweep(
   workspaceId: string,
   stat: SweepStat
 ): Promise<void> {
-  // Only log when something happened or something went wrong.
-  if (stat.enqueued === 0 && stat.errors.length === 0) return;
+  // Only log errors unconditionally
+  if (stat.errors.length > 0) {
+    await prisma.operationalEvent
+      .create({
+        data: {
+          workspaceId,
+          source: "SYSTEM",
+          level: "WARNING",
+          message: `Comment sweep "${stat.campaign}" [${stat.keywords}] errors: ${stat.errors.join("; ")}`,
+          payload: { ...stat },
+        },
+      })
+      .catch(() => {});
+    return;
+  }
+
+  // Skip INFO logs if nothing was enqueued
+  if (stat.enqueued === 0) return;
+
+  // Rate-limit INFO logs: at most once per campaign per hour
+  const now = Date.now();
+  const lastLog = lastSweepLogTime.get(stat.campaign) ?? 0;
+
+  if (now - lastLog < SWEEP_LOG_INTERVAL_MS) return;
+
+  lastSweepLogTime.set(stat.campaign, now);
 
   await prisma.operationalEvent
     .create({
       data: {
         workspaceId,
         source: "SYSTEM",
-        level: stat.errors.length > 0 ? "WARNING" : "INFO",
+        level: "INFO",
         message: `Comment sweep "${stat.campaign}" [${stat.keywords}]: ${stat.enqueued} enqueued, ${stat.matched} matched, ${stat.alreadyReplied} already replied`,
         payload: { ...stat },
       },

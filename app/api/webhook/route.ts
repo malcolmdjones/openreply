@@ -10,8 +10,13 @@ import {
 } from "@/lib/meta/webhook";
 import { MESSAGE_JOB_NAME, POSTBACK_JOB_NAME } from "@/lib/queue/client";
 import { Prisma } from "@/app/generated/prisma/client";
+import { createHash } from "crypto";
 
 const OPENING_DM_READ_FALLBACK_DELAY_MS = 5 * 60 * 1000;
+
+// Track last signature-failure alert time to rate-limit spam
+let lastSignatureFailureAlert = 0;
+const SIGNATURE_FAILURE_ALERT_INTERVAL_MS = 10 * 60 * 1000;
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
@@ -34,23 +39,25 @@ export async function POST(request: NextRequest) {
   const signature = request.headers.get("x-hub-signature-256");
 
   if (!verifyWebhookSignature(rawBody, signature)) {
-    // Record the attempt so a signature mismatch is visible rather than a
-    // silent 401. This is the common symptom of FACEBOOK_APP_SECRET being
-    // set to the wrong app's secret for the webhook's signing key.
-    await prisma.operationalEvent
-      .create({
-        data: {
-          source: "SYSTEM",
-          level: "WARNING",
-          message: "Webhook signature verification failed",
-          payload: {
-            hadSignatureHeader: Boolean(signature),
-            bodyLength: rawBody.length,
-            bodyPreview: rawBody.slice(0, 200),
+    // Rate-limit signature-failure OperationalEvent: at most one per 10 minutes
+    const now = Date.now();
+    if (now - lastSignatureFailureAlert > SIGNATURE_FAILURE_ALERT_INTERVAL_MS) {
+      lastSignatureFailureAlert = now;
+      await prisma.operationalEvent
+        .create({
+          data: {
+            source: "SYSTEM",
+            level: "WARNING",
+            message: "Webhook signature verification failed",
+            payload: {
+              hadSignatureHeader: Boolean(signature),
+              bodyLength: rawBody.length,
+              bodyPreview: rawBody.slice(0, 200),
+            },
           },
-        },
-      })
-      .catch(() => {});
+        })
+        .catch(() => {});
+    }
     return NextResponse.json(
       { success: false, error: "Invalid signature" },
       { status: 401 }
@@ -67,8 +74,71 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Check if there are any actionable events before persisting
+  const commentEvents = parseCommentEvents(
+    payload as Parameters<typeof parseCommentEvents>[0]
+  );
+  const postbackEvents = parsePostbackEvents(
+    payload as Parameters<typeof parsePostbackEvents>[0]
+  );
+  const messageEvents = parseMessageEvents(
+    payload as Parameters<typeof parseMessageEvents>[0]
+  );
+  const readEvents = parseReadEvents(
+    payload as Parameters<typeof parseReadEvents>[0]
+  );
+
+  const hasActionableEvents =
+    commentEvents.length > 0 ||
+    postbackEvents.length > 0 ||
+    messageEvents.length > 0 ||
+    readEvents.length > 0;
+
+  // Skip persisting non-actionable events (read receipts without opening DMs, echoes, etc.)
+  if (!hasActionableEvents) {
+    return NextResponse.json({ success: true }, { status: 200 });
+  }
+
+  // Dedupe retries: generate a deterministic hash from the payload
+  const payloadHash = createHash("sha256")
+    .update(JSON.stringify(payload))
+    .digest("hex")
+    .slice(0, 16);
+
+  // Check if we've already stored this exact payload
+  const existing = await prisma.webhookEvent.findFirst({
+    where: {
+      id: { startsWith: `wh_${payloadHash}` },
+    },
+    select: { id: true },
+  });
+
+  if (existing) {
+    // Already processed this webhook (retry from Meta), return 200
+    return NextResponse.json({ success: true }, { status: 200 });
+  }
+
+  // Determine workspaceId from the first event's Instagram account
+  let workspaceId: string | null = null;
+  const firstInstagramAccountId =
+    commentEvents[0]?.instagramAccountId ||
+    postbackEvents[0]?.instagramAccountId ||
+    messageEvents[0]?.instagramAccountId ||
+    readEvents[0]?.instagramAccountId;
+
+  if (firstInstagramAccountId) {
+    const account = await prisma.instagramAccount.findUnique({
+      where: { instagramId: firstInstagramAccountId },
+      select: { workspaceId: true },
+    });
+    workspaceId = account?.workspaceId ?? null;
+  }
+
+  // Create WebhookEvent with deterministic ID for deduplication and workspaceId set at insert
   const webhookEvent = await prisma.webhookEvent.create({
     data: {
+      id: `wh_${payloadHash}_${Date.now()}`,
+      workspaceId,
       object:
         typeof payload === "object" && payload && "object" in payload
           ? String(payload.object)
@@ -79,17 +149,9 @@ export async function POST(request: NextRequest) {
   });
 
   try {
-    const commentEvents = parseCommentEvents(
-      payload as Parameters<typeof parseCommentEvents>[0]
-    );
     const queue = getDMQueue();
 
     for (const event of commentEvents) {
-      const account = await prisma.instagramAccount.findUnique({
-        where: { instagramId: event.instagramAccountId },
-        select: { workspaceId: true },
-      });
-
       await queue.add(
         "process-comment",
         {
@@ -106,20 +168,9 @@ export async function POST(request: NextRequest) {
           jobId: `comment_${event.instagramAccountId}_${event.commentId}`,
         }
       );
-
-      if (account) {
-        await prisma.webhookEvent.update({
-          where: { id: webhookEvent.id },
-          data: { workspaceId: account.workspaceId },
-        });
-      }
     }
 
     // Button taps from opening DMs → deliver the reveal message.
-    const postbackEvents = parsePostbackEvents(
-      payload as Parameters<typeof parsePostbackEvents>[0]
-    );
-
     for (const event of postbackEvents) {
       await queue.add(
         POSTBACK_JOB_NAME,
@@ -140,16 +191,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Inbound DMs → keyword-triggered autoreply.
-    const messageEvents = parseMessageEvents(
-      payload as Parameters<typeof parseMessageEvents>[0]
-    );
-
     for (const event of messageEvents) {
-      const account = await prisma.instagramAccount.findUnique({
-        where: { instagramId: event.instagramAccountId },
-        select: { workspaceId: true },
-      });
-
       await queue.add(
         MESSAGE_JOB_NAME,
         {
@@ -168,22 +210,11 @@ export async function POST(request: NextRequest) {
           ).toString("base64url")}`,
         }
       );
-
-      if (account) {
-        await prisma.webhookEvent.update({
-          where: { id: webhookEvent.id },
-          data: { workspaceId: account.workspaceId },
-        });
-      }
     }
 
     // If a user reads the opening DM and never taps the button, deliver the
     // same next-step DM after five minutes. The worker no-ops this delayed job
     // if a real button tap has already delivered the reveal.
-    const readEvents = parseReadEvents(
-      payload as Parameters<typeof parseReadEvents>[0]
-    );
-
     for (const event of readEvents) {
       const openingLogs = await prisma.dmLog.findMany({
         where: {

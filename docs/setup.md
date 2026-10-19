@@ -112,6 +112,20 @@ Optional, for tuning the polling reconciler (defaults are fine to start):
 | `COMMENT_POLL_MAX_PER_SWEEP` | `30` | Max new comments each campaign acts on per sweep. Keep it conservative; higher gets closer to Instagram's rate limits. |
 | `COMMENT_POLL_LOOKBACK_HOURS` | `72` | How far back a sweep considers comments. |
 
+Optional, for database retention and size thresholds (see [Database Guardrails](./db-guardrails.md)):
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `DB_RETENTION_WEBHOOK_EVENT_DAYS` | `7` | Delete WebhookEvent rows older than this (except those with `original_media_id`). |
+| `DB_RETENTION_WEBHOOK_EVENT_WITH_MEDIA_DAYS` | `90` | Keep WebhookEvent rows containing `original_media_id` for this many days (needed for ad lookups). |
+| `DB_RETENTION_OPERATIONAL_EVENT_INFO_DAYS` | `14` | Delete INFO-level OperationalEvent rows older than this. |
+| `DB_RETENTION_OPERATIONAL_EVENT_ALL_DAYS` | `60` | Delete all OperationalEvent rows older than this. |
+| `DB_RETENTION_LINK_CLICK_DAYS` | `180` | Delete LinkClick rows older than this. |
+| `DB_RETENTION_DM_LOG_DAYS` | `180` | Delete DmLog rows older than this. |
+| `DB_RETENTION_DM_LOG_SCRUB_DAYS` | `30` | Scrub `commentText` and `commenterName` from DmLog after this many days. |
+| `DB_SIZE_WARNING_MB` | `350` | Database size threshold for warning status. |
+| `DB_SIZE_ERROR_MB` | `450` | Database size threshold for error status. |
+
 ## The Meta app
 
 This is the slow part. The code works out of the box; getting Meta to send you comment events is where people lose an afternoon. Every step here exists because skipping it breaks something later. Have your Vercel domain from Step 3 ready, you will paste it in a few times.

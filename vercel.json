@@ -1,6 +1,10 @@
 {
   "crons": [
     {
+      "path": "/api/cron/prune",
+      "schedule": "0 4 * * *"
+    },
+    {
       "path": "/api/cron/refresh-tokens",
       "schedule": "0 5 * * *"
     },
