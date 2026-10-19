@@ -5,7 +5,14 @@ import os from "node:os";
 
 const worker = createDMWorker();
 const startedAt = new Date().toISOString();
-const HEARTBEAT_INTERVAL_MS = 30_000;
+
+// Worker health heartbeat interval (default 5 min to conserve Redis commands).
+// Upstash free tier allows only ~11 commands/min average; tuning this plus
+// BullMQ settings keeps idle usage under ~3.5/min (~150k/month).
+const HEARTBEAT_INTERVAL_MS = Number(
+  process.env.WORKER_HEARTBEAT_INTERVAL_MS ?? 5 * 60_000
+);
+
 // Polling safety net for comments that webhooks miss. Runs in the worker because
 // it must fire every few minutes and Vercel's free crons only run once a day.
 const POLL_INTERVAL_MS = Number(

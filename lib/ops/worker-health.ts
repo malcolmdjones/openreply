@@ -2,7 +2,12 @@ import { getRedisConnection } from "@/lib/queue/client";
 
 const WORKER_HEALTH_KEY = "health:worker:dm";
 const WORKER_ALERTS_KEY = "alerts:worker:dm";
-const WORKER_HEARTBEAT_TTL_SECONDS = 120;
+
+// Heartbeat TTL must be longer than the heartbeat interval to avoid false
+// negatives. Default 12 min for a 5 min heartbeat interval (2.4x margin).
+const WORKER_HEARTBEAT_TTL_SECONDS = Number(
+  process.env.WORKER_HEARTBEAT_TTL_SECONDS ?? 12 * 60
+);
 
 export interface WorkerHeartbeat {
   status: "running";

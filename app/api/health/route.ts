@@ -157,6 +157,9 @@ async function checkQueue(): Promise<HealthCheck & { counts?: unknown }> {
 }
 
 export async function GET() {
+  // Worker health is based on heartbeat age vs TTL. With reduced-frequency
+  // heartbeats (default 5 min) and a 12 min TTL, the worker is healthy as long
+  // as the last heartbeat was within 12 minutes (allowing 2-3 missed intervals).
   const [database, redis, queue, worker] = await Promise.all([
     checkDatabase(),
     checkRedis(),
