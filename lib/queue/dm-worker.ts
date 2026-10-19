@@ -1259,11 +1259,11 @@ export function createDMWorker(): Worker<DmQueueJob> {
     {
       connection: getRedisConnection(),
       concurrency: 5,
+      drainDelay: DRAIN_DELAY_MS,
+      stalledInterval: STALLED_INTERVAL_MS,
+      lockDuration: LOCK_DURATION_MS,
+      maxStalledCount: MAX_STALLED_COUNT,
       settings: {
-        drainDelay: DRAIN_DELAY_MS,
-        stalledInterval: STALLED_INTERVAL_MS,
-        lockDuration: LOCK_DURATION_MS,
-        maxStalledCount: MAX_STALLED_COUNT,
         backoffStrategy: (attemptsMade: number) =>
           BACKOFF_DELAYS[Math.min(attemptsMade - 1, BACKOFF_DELAYS.length - 1)],
       },
