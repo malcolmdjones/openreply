@@ -54,8 +54,24 @@ export async function GET(request: Request) {
 
   const { error } = await supabase.auth.exchangeCodeForSession(code);
   if (error) {
+    // Log the actual error for debugging (rate-limited, no secrets)
+    console.error("[Auth Callback] exchangeCodeForSession failed:", {
+      message: error.message,
+      name: error.name,
+      status: error.status,
+    });
+    
     const loginUrl = new URL("/login", origin);
-    loginUrl.searchParams.set("error", "exchange_failed");
+    // Surface more specific error codes based on the error
+    if (error.message?.includes("code_verifier")) {
+      loginUrl.searchParams.set("error", "pkce_code_verifier_missing");
+    } else if (error.message?.includes("already been used")) {
+      loginUrl.searchParams.set("error", "code_already_used");
+    } else if (error.status === 400) {
+      loginUrl.searchParams.set("error", "bad_request");
+    } else {
+      loginUrl.searchParams.set("error", "exchange_failed");
+    }
     return NextResponse.redirect(loginUrl);
   }
 

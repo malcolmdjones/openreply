@@ -11,6 +11,12 @@ function loginErrorMessage(error: string | undefined): string | null {
   switch (error) {
     case "not_allowed":
       return "That Google account is not on the allowlist for this OpenReply instance.";
+    case "pkce_code_verifier_missing":
+      return "Authentication cookies were not preserved. Try disabling shields/ad blockers, or use a different browser.";
+    case "code_already_used":
+      return "This sign-in link was already used. Please start a new sign-in.";
+    case "bad_request":
+      return "Invalid authentication request. Please try signing in again.";
     case "exchange_failed":
     case "missing_code":
     case "oauth_error":
