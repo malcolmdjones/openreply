@@ -213,6 +213,59 @@ export async function sendPrivateReplyWithButton(
 }
 
 /**
+ * A postback button in a DM button template. Up to 3 buttons allowed by Meta.
+ */
+export interface PostbackButton {
+  title: string;
+  payload: string;
+}
+
+/**
+ * Send a private reply to a comment as a button template with 2-3 postback
+ * buttons — the question-first flow where tapping a choice fires a postback
+ * that delivers a per-choice reply message.
+ */
+export async function sendPrivateReplyWithMultipleButtons(
+  accessToken: string,
+  instagramAccountId: string,
+  commentId: string,
+  text: string,
+  buttons: PostbackButton[]
+): Promise<{ recipient_id: string; message_id: string }> {
+  const response = await fetch(
+    `${instagramGraphBase()}/${instagramAccountId}/messages`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
+        recipient: { comment_id: commentId },
+        message: {
+          attachment: {
+            type: "template",
+            payload: {
+              template_type: "button",
+              text: text.slice(0, 640),
+              buttons: buttons
+                .slice(0, 3)
+                .map((b) => ({
+                  type: "postback",
+                  title: b.title.slice(0, 20),
+                  payload: b.payload,
+                })),
+            },
+          },
+        },
+      }),
+    }
+  );
+
+  return handleResponse(response);
+}
+
+/**
  * Send a direct message (to a user's IGSID) as a button template with a single
  * postback button. Used to re-prompt a user during follow-gating, so tapping
  * the button fires another `messaging_postbacks` webhook carrying `payload`.

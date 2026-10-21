@@ -49,7 +49,7 @@ export async function duplicateCampaign({
 
   // Every setting on the row carries over. The links are recreated rather than
   // spread, since they are rows of their own.
-  const { trackedLinks, ...settings } = source;
+  const { trackedLinks, questionChoices, ...settings } = source;
 
   return prisma.automation.create({
     data: {
@@ -64,6 +64,8 @@ export async function duplicateCampaign({
       name: buildDuplicateName(settings.name),
       isActive: false,
       reportShareSlug: generateReportShareSlug(),
+      // JSON fields need explicit handling: null from DB -> undefined for Prisma input
+      questionChoices: questionChoices === null ? undefined : questionChoices,
       trackedLinks: {
         create: trackedLinks.map((link) => ({
           workspaceId: source.workspaceId,

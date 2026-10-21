@@ -198,6 +198,10 @@ model Automation {
   publicReplyEnabled Boolean @default(false)
   publicReplyMessage String?
   publicReplyMessages String[] @default([])
+  // Question-first flow: opening DM with 2-3 postback buttons (answer choices).
+  // Each choice has { label, replyText, linkUrl?, linkButtonLabel? }.
+  // When set, this replaces the single-button opening DM flow.
+  questionChoices Json?
   isActive       Boolean @default(true)
   wholeWordMatch Boolean @default(true)
   reportShareSlug    String? @unique

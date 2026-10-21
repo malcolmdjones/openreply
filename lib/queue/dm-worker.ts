@@ -24,6 +24,8 @@ import {
   sendPrivateReply,
   sendPrivateReplyWithButton,
   sendPrivateReplyWithLinkButton,
+  sendPrivateReplyWithMultipleButtons,
+  type PostbackButton,
 } from "@/lib/meta/client";
 import { decryptToken } from "@/lib/meta/oauth";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
@@ -38,6 +40,16 @@ import {
   renderMessageWithTracking,
   renderMessageWithoutLink,
 } from "@/lib/tracking/message";
+
+/**
+ * A single answer choice in the question-first flow.
+ */
+interface QuestionChoice {
+  label: string;
+  replyText: string;
+  linkUrl?: string;
+  linkButtonLabel?: string;
+}
 
 const BACKOFF_DELAYS = [5 * 60 * 1000, 15 * 60 * 1000, 45 * 60 * 1000];
 
@@ -75,6 +87,35 @@ type WorkerTrackedLink = {
   label: string | null;
   destinationUrl: string;
 };
+
+/**
+ * Build an attributed URL for AppsFlyer OneLink tracking.
+ * Appends af_sub1 (mediaId), af_sub2 (choice label slug), af_sub3 (automation id),
+ * and af_sub4 (post shortcode if available) query params, preserving any existing
+ * query parameters.
+ */
+function buildAttributedUrl(
+  baseUrl: string,
+  mediaId: string,
+  choiceLabel: string,
+  automationId: string,
+  postUrl?: string | null
+): string {
+  const url = new URL(baseUrl);
+  url.searchParams.set("af_sub1", mediaId);
+  url.searchParams.set("af_sub2", choiceLabel.toLowerCase().replace(/\s+/g, "-"));
+  url.searchParams.set("af_sub3", automationId);
+  
+  // Extract post shortcode from permalink if available (e.g. instagram.com/p/ABC123/)
+  if (postUrl) {
+    const match = postUrl.match(/\/p\/([^/]+)/);
+    if (match) {
+      url.searchParams.set("af_sub4", match[1]);
+    }
+  }
+  
+  return url.toString();
+}
 
 /**
  * Build the tappable link buttons for a DM. The first link uses the campaign's
@@ -537,6 +578,16 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       Boolean(automation.openingDmMessage) &&
       Boolean(automation.openingDmButtonLabel);
 
+    // Question-first flow: opening DM with 2-3 answer-choice buttons.
+    const questionChoicesRaw = automation.questionChoices as
+      | { choices?: QuestionChoice[]; defaultLinkUrl?: string }
+      | null
+      | undefined;
+    const questionChoices =
+      questionChoicesRaw?.choices && questionChoicesRaw.choices.length >= 2
+        ? questionChoicesRaw
+        : null;
+
     // Follow-gating: the link is revealed only after a follow. When an opening
     // DM is enabled it comes FIRST, and its button routes into the follow check
     // (opening DM → follow gate → link). Without an opening DM, we check follow
@@ -549,7 +600,29 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     }
 
     try {
-      if (useOpeningDm) {
+      if (questionChoices) {
+        // Question-first flow: opening DM with 2-3 postback buttons.
+        const openingText = renderMessageWithTracking({
+          message: automation.openingDmMessage as string,
+          commenterName,
+          trackedLinks: [],
+        });
+        const buttons: PostbackButton[] = questionChoices.choices!.map(
+          (choice, index) => ({
+            title: choice.label,
+            // Payload format: q:<automationId>:<choiceIndex>:<mediaId>
+            // The mediaId is needed for AppsFlyer attribution (af_sub1).
+            payload: `q:${automation.id}:${index}:${mediaId}`,
+          })
+        );
+        await sendPrivateReplyWithMultipleButtons(
+          accessToken,
+          automation.instagramAccount.instagramId,
+          commentId,
+          openingText,
+          buttons
+        );
+      } else if (useOpeningDm) {
         const openingText = renderMessageWithTracking({
           message: automation.openingDmMessage as string,
           commenterName,
@@ -683,17 +756,34 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
 
 /**
  * Deliver the reveal message after a user taps an opening DM's button.
- * The postback payload is `reveal:<automationId>`; the sender is the user's
- * IGSID (same id as their comment author id), which we DM directly.
+ * The postback payload is `reveal:<automationId>`, `followcheck:<automationId>`,
+ * or `q:<automationId>:<choiceIndex>:<mediaId>` for question-first flow.
  */
 async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   const { instagramAccountId, userId, payload, fallback } = job.data;
 
+  // Question-first flow: payload is `q:<automationId>:<choiceIndex>:<mediaId>`
+  const isQuestionChoice = payload.startsWith("q:");
   const isFollowCheck = payload.startsWith("followcheck:");
-  if (!isFollowCheck && !payload.startsWith("reveal:")) return;
-  const automationId = payload.slice(
-    isFollowCheck ? "followcheck:".length : "reveal:".length
-  );
+  if (!isQuestionChoice && !isFollowCheck && !payload.startsWith("reveal:"))
+    return;
+
+  let automationId: string;
+  let choiceIndex: number | null = null;
+  let mediaId: string | null = null;
+
+  if (isQuestionChoice) {
+    const parts = payload.split(":");
+    if (parts.length !== 4) return;
+    automationId = parts[1];
+    choiceIndex = parseInt(parts[2], 10);
+    mediaId = parts[3];
+    if (isNaN(choiceIndex)) return;
+  } else {
+    automationId = payload.slice(
+      isFollowCheck ? "followcheck:".length : "reveal:".length
+    );
+  }
 
   const automation = await prisma.automation.findFirst({
     where: { id: automationId, isActive: true },
@@ -712,6 +802,167 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
     automation.instagramAccount.instagramId !== instagramAccountId ||
     !automation.instagramAccount.accessToken
   ) {
+    return;
+  }
+
+  let accessToken: string;
+  try {
+    accessToken = decryptToken(automation.instagramAccount.accessToken);
+  } catch {
+    return;
+  }
+
+  // Question-first flow: send the per-choice reply.
+  if (isQuestionChoice && choiceIndex !== null) {
+    const questionChoicesRaw = automation.questionChoices as
+      | { choices?: QuestionChoice[]; defaultLinkUrl?: string }
+      | null
+      | undefined;
+    const choice = questionChoicesRaw?.choices?.[choiceIndex];
+    if (!choice) return;
+
+    // Dedup by choice: each tap of the same choice is idempotent.
+    const dedupeId = `q:${userId}:${choiceIndex}`;
+    const existingReply = await prisma.dmLog.findUnique({
+      where: {
+        automationId_commentId: {
+          automationId: automation.id,
+          commentId: dedupeId,
+        },
+      },
+    });
+    if (existingReply?.status === "SENT") return;
+
+    // Personalize {username} from the opening DM log for this user, if present.
+    const openingLog = await prisma.dmLog.findFirst({
+      where: { automationId: automation.id, commenterId: userId },
+      select: { commenterName: true },
+    });
+    const commenterName = openingLog?.commenterName ?? null;
+
+    const usage = await reserveWorkspaceDMSend(automation.workspaceId);
+    if (!usage.allowed) {
+      await prisma.dmLog.upsert({
+        where: {
+          automationId_commentId: {
+            automationId: automation.id,
+            commentId: dedupeId,
+          },
+        },
+        create: {
+          workspaceId: automation.workspaceId,
+          automationId: automation.id,
+          instagramAccountId: automation.instagramAccountId,
+          commenterId: userId,
+          commenterName,
+          commentText: `(choice: ${choice.label})`,
+          commentId: dedupeId,
+          status: "SKIPPED_PLAN_LIMIT",
+          errorMessage: `Monthly DM limit reached (${usage.limit})`,
+        },
+        update: { status: "SKIPPED_PLAN_LIMIT" },
+      });
+      return;
+    }
+
+    try {
+      const replyText = renderMessageWithoutLink({
+        message: choice.replyText,
+        commenterName,
+      });
+      const linkUrl = choice.linkUrl || questionChoicesRaw?.defaultLinkUrl;
+      if (linkUrl && mediaId) {
+        // Send reply text + web_url button with AppsFlyer attribution.
+        const attributedUrl = buildAttributedUrl(
+          linkUrl,
+          mediaId,
+          choice.label,
+          automation.id,
+          automation.postUrl
+        );
+        await sendDirectMessageWithLinkButton(
+          accessToken,
+          automation.instagramAccount.instagramId,
+          userId,
+          replyText,
+          [
+            {
+              title: choice.linkButtonLabel || "Get the app",
+              url: attributedUrl,
+            },
+          ]
+        );
+      } else if (linkUrl) {
+        // Fallback: no mediaId available (shouldn't happen in normal flow).
+        await sendDirectMessageWithLinkButton(
+          accessToken,
+          automation.instagramAccount.instagramId,
+          userId,
+          replyText,
+          [
+            {
+              title: choice.linkButtonLabel || "Get the app",
+              url: linkUrl,
+            },
+          ]
+        );
+      } else {
+        // Send reply text only.
+        await sendDirectMessage(
+          accessToken,
+          automation.instagramAccount.instagramId,
+          userId,
+          replyText
+        );
+      }
+
+      await prisma.dmLog.upsert({
+        where: {
+          automationId_commentId: {
+            automationId: automation.id,
+            commentId: dedupeId,
+          },
+        },
+        create: {
+          workspaceId: automation.workspaceId,
+          automationId: automation.id,
+          instagramAccountId: automation.instagramAccountId,
+          commenterId: userId,
+          commenterName,
+          commentText: `(choice: ${choice.label})`,
+          commentId: dedupeId,
+          status: "SENT",
+          dmSentAt: new Date(),
+        },
+        update: { status: "SENT", dmSentAt: new Date(), errorMessage: null },
+      });
+    } catch (error) {
+      await releaseWorkspaceDMReservation(
+        automation.workspaceId,
+        usage.periodStart
+      );
+      await prisma.dmLog.upsert({
+        where: {
+          automationId_commentId: {
+            automationId: automation.id,
+            commentId: dedupeId,
+          },
+        },
+        create: {
+          workspaceId: automation.workspaceId,
+          automationId: automation.id,
+          instagramAccountId: automation.instagramAccountId,
+          commenterId: userId,
+          commenterName,
+          commentText: `(choice: ${choice.label})`,
+          commentId: dedupeId,
+          status: "FAILED",
+          errorMessage: formatError(error),
+        },
+        update: { status: "FAILED", errorMessage: formatError(error) },
+      });
+      throw error;
+    }
     return;
   }
 
@@ -737,13 +988,6 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
     select: { commenterName: true },
   });
   const commenterName = openingLog?.commenterName ?? null;
-
-  let accessToken: string;
-  try {
-    accessToken = decryptToken(automation.instagramAccount.accessToken);
-  } catch {
-    return;
-  }
 
   // Follow-gate: before revealing the link, verify the user follows. On a
   // `followcheck:` tap a non-follower gets the prompt again (no quota spent);
