@@ -1,0 +1,35 @@
+{
+  "name": "Food app question-first demo",
+  "goal": "Qualify leads by main goal before sharing app link",
+  "keywords": ["FOOD"],
+  "matchAnyWord": false,
+  "wholeWordMatch": true,
+  "matchAnyPost": true,
+  "dmTriggerEnabled": false,
+  "dmMessage": "Thanks for your interest! 🍓",
+  "openingDmEnabled": true,
+  "openingDmMessage": "hey! 🍓 sending it over, quick q first. what's the main goal right now?",
+  "questionChoices": {
+    "defaultLinkUrl": "https://dishco.onelink.me/DbZN?pid=instagram_dm&c=ig_comment_food&af_channel=comment_to_dm",
+    "choices": [
+      {
+        "label": "Lose weight",
+        "replyText": "amazing! yeah losing weight is way easier when you have meals you actually enjoy. here's your link {username} 👇",
+        "linkButtonLabel": "Get the app"
+      },
+      {
+        "label": "More protein",
+        "replyText": "love it! high-protein meals that taste good (not just chicken breast lol). tapping this will get you set up 👇",
+        "linkButtonLabel": "Get the app"
+      },
+      {
+        "label": "Easy meals",
+        "replyText": "yesss, no one has time to meal prep all day. quick & simple = way more sustainable. link below {username} 👇",
+        "linkButtonLabel": "Get the app"
+      }
+    ]
+  },
+  "publicReplyEnabled": false,
+  "requireFollow": false,
+  "isActive": true
+}

@@ -15,6 +15,13 @@ import {
 // immediately), so never cache it at the route or CDN layer.
 export const dynamic = "force-dynamic";
 
+const questionChoiceSchema = z.object({
+  label: z.string().min(1).max(20),
+  replyText: z.string().min(1).max(1000),
+  linkUrl: z.string().url().optional().nullable(),
+  linkButtonLabel: z.string().max(20).optional().nullable(),
+});
+
 const createAutomationSchema = z
   .object({
     name: z.string().min(1).max(100),
@@ -58,6 +65,14 @@ const createAutomationSchema = z
       .optional()
       .nullable(),
     secondaryButtonLabel: z.string().max(20).optional().nullable(),
+    // Question-first flow: opening DM with 2-3 answer choices.
+    questionChoices: z
+      .object({
+        choices: z.array(questionChoiceSchema).min(2).max(3),
+        defaultLinkUrl: z.string().url().optional().nullable(),
+      })
+      .optional()
+      .nullable(),
     isActive: z.boolean().optional().default(true),
     wholeWordMatch: z.boolean().optional().default(true),
   })
@@ -71,13 +86,17 @@ const createAutomationSchema = z
     message: "Add at least one keyword, or match any word",
     path: ["keywords"],
   })
-  // An opening DM needs both a message and a button label.
+  // An opening DM needs both a message and a button label (or questionChoices).
   .refine(
     (d) =>
       !d.openingDmEnabled ||
+      Boolean(d.questionChoices?.choices?.length) ||
       (Boolean(d.openingDmMessage?.trim()) &&
         Boolean(d.openingDmButtonLabel?.trim())),
-    { message: "Opening DM needs a message and a button label", path: ["openingDmMessage"] }
+    {
+      message: "Opening DM needs a message and a button label or question choices",
+      path: ["openingDmMessage"],
+    }
   );
 
 const updateAutomationSchema = z.object({
@@ -119,6 +138,14 @@ const updateAutomationSchema = z.object({
     .optional()
     .nullable(),
   secondaryButtonLabel: z.string().max(20).optional().nullable(),
+  // Question-first flow configuration (null to clear).
+  questionChoices: z
+    .object({
+      choices: z.array(questionChoiceSchema).min(2).max(3),
+      defaultLinkUrl: z.string().url().optional().nullable(),
+    })
+    .optional()
+    .nullable(),
 });
 
 export async function GET(request: NextRequest) {
@@ -425,6 +452,7 @@ export async function POST(request: NextRequest) {
       publicReplyMessage: parsed.data.publicReplyEnabled
         ? publicReplyList[0] ?? parsed.data.publicReplyMessage ?? null
         : null,
+      questionChoices: parsed.data.questionChoices || undefined,
       isActive: parsed.data.isActive,
       wholeWordMatch: parsed.data.wholeWordMatch,
       workspaceId,
@@ -500,6 +528,7 @@ export async function PATCH(request: NextRequest) {
     trackedDestinationUrl,
     secondaryDestinationUrl,
     secondaryButtonLabel,
+    questionChoices,
     ...automationData
   } = parsed.data;
 
@@ -538,7 +567,12 @@ export async function PATCH(request: NextRequest) {
 
   const updated = await prisma.automation.update({
     where: { id: automationId },
-    data: automationData,
+    data: {
+      ...automationData,
+      ...(questionChoices !== undefined
+        ? { questionChoices: questionChoices === null ? undefined : questionChoices }
+        : {}),
+    },
   });
 
   // Update, create, or clear the campaign's primary tracked link when a

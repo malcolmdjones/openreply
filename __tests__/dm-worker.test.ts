@@ -5,6 +5,7 @@ const {
   mockSendPrivateReply,
   mockSendPrivateReplyWithLinkButton,
   mockSendPrivateReplyWithButton,
+  mockSendPrivateReplyWithMultipleButtons,
   mockGetUserFollowStatus,
   mockSendDirectMessageWithButton,
   mockSendDirectMessage,
@@ -38,6 +39,7 @@ const {
   mockSendPrivateReply: vi.fn(),
   mockSendPrivateReplyWithLinkButton: vi.fn(),
   mockSendPrivateReplyWithButton: vi.fn(),
+  mockSendPrivateReplyWithMultipleButtons: vi.fn(),
   mockGetUserFollowStatus: vi.fn(),
   mockSendDirectMessageWithButton: vi.fn(),
   mockSendDirectMessage: vi.fn(),
@@ -58,6 +60,7 @@ vi.mock("@/lib/meta/client", () => ({
   sendPrivateReply: mockSendPrivateReply,
   sendPrivateReplyWithLinkButton: mockSendPrivateReplyWithLinkButton,
   sendPrivateReplyWithButton: mockSendPrivateReplyWithButton,
+  sendPrivateReplyWithMultipleButtons: mockSendPrivateReplyWithMultipleButtons,
   getUserFollowStatus: mockGetUserFollowStatus,
   sendDirectMessageWithButton: mockSendDirectMessageWithButton,
   sendDirectMessage: mockSendDirectMessage,
@@ -259,6 +262,10 @@ beforeEach(() => {
   mockSendPrivateReplyWithButton.mockResolvedValue({
     recipient_id: "commenter_999",
     message_id: "msg_003",
+  });
+  mockSendPrivateReplyWithMultipleButtons.mockResolvedValue({
+    recipient_id: "commenter_999",
+    message_id: "msg_003_multi",
   });
   mockSendDirectMessageWithButton.mockResolvedValue({
     recipient_id: "commenter_999",
@@ -1114,5 +1121,239 @@ describe("DM Worker — DM keyword trigger", () => {
         create: expect.objectContaining({ status: "FAILED" }),
       })
     );
+  });
+});
+
+describe("DM Worker — question-first flow", () => {
+  const questionFirstAutomation = {
+    ...mockAutomation,
+    openingDmEnabled: true,
+    openingDmMessage: "hey {username}! 🍓 quick q first. what's the main goal right now?",
+    questionChoices: {
+      defaultLinkUrl: "https://dishco.onelink.me/DbZN?pid=instagram_dm&c=ig_comment_food&af_channel=comment_to_dm",
+      choices: [
+        {
+          label: "Lose weight",
+          replyText: "amazing! here's your link {username} 👇",
+          linkButtonLabel: "Get the app",
+        },
+        {
+          label: "More protein",
+          replyText: "love it! tapping this will get you set up 👇",
+          linkButtonLabel: "Get the app",
+        },
+        {
+          label: "Easy meals",
+          replyText: "yesss! link below {username} 👇",
+          linkButtonLabel: "Get the app",
+        },
+      ],
+    },
+    postUrl: "https://www.instagram.com/p/ABC123/",
+  };
+
+  beforeEach(() => {
+    mockPrisma.automation.findMany.mockResolvedValue([questionFirstAutomation]);
+    mockPrisma.automation.findFirst.mockResolvedValue(questionFirstAutomation);
+  });
+
+  it("should send opening DM with multiple postback buttons (2-3 choices)", async () => {
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReplyWithMultipleButtons).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "comment_555",
+      "hey commenter_user! 🍓 quick q first. what's the main goal right now?",
+      [
+        { title: "Lose weight", payload: "q:auto_789:0:media_101" },
+        { title: "More protein", payload: "q:auto_789:1:media_101" },
+        { title: "Easy meals", payload: "q:auto_789:2:media_101" },
+      ]
+    );
+    expect(mockSendPrivateReplyWithButton).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "SENT" }),
+      })
+    );
+  });
+
+  it("should handle postback and send per-choice reply with attributed link", async () => {
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "q:auto_789:1:media_101", // Choice index 1: "More protein"
+      })
+    );
+
+    expect(mockSendDirectMessageWithLinkButton).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "commenter_999",
+      "love it! tapping this will get you set up 👇",
+      [
+        {
+          title: "Get the app",
+          url: expect.stringContaining("af_sub1=media_101"),
+        },
+      ]
+    );
+
+    // Verify all attribution params are present
+    const call = mockSendDirectMessageWithLinkButton.mock.calls[0];
+    const url = call[4][0].url;
+    expect(url).toContain("af_sub1=media_101");
+    expect(url).toContain("af_sub2=more-protein");
+    expect(url).toContain("af_sub3=auto_789");
+    expect(url).toContain("af_sub4=ABC123");
+    // Verify existing params preserved
+    expect(url).toContain("pid=instagram_dm");
+    expect(url).toContain("c=ig_comment_food");
+    expect(url).toContain("af_channel=comment_to_dm");
+  });
+
+  it("should handle postback idempotently (same choice tap = one reply)", async () => {
+    mockPrisma.dmLog.findUnique.mockResolvedValue({ status: "SENT" });
+
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "q:auto_789:0:media_101",
+      })
+    );
+
+    expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+  });
+
+  it("should use per-choice link URL when configured", async () => {
+    const automationWithPerChoiceUrl = {
+      ...questionFirstAutomation,
+      questionChoices: {
+        defaultLinkUrl: "https://default.onelink.me/ABC",
+        choices: [
+          {
+            label: "Custom choice",
+            replyText: "here you go!",
+            linkUrl: "https://custom.onelink.me/XYZ?param=value",
+            linkButtonLabel: "Custom button",
+          },
+        ],
+      },
+    };
+    mockPrisma.automation.findFirst.mockResolvedValue(automationWithPerChoiceUrl);
+
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "q:auto_789:0:media_101",
+      })
+    );
+
+    const call = mockSendDirectMessageWithLinkButton.mock.calls[0];
+    const url = call[4][0].url;
+    expect(url).toContain("custom.onelink.me");
+    expect(url).toContain("param=value");
+    expect(url).toContain("af_sub1=media_101");
+    expect(call[4][0].title).toBe("Custom button");
+  });
+
+  it("should fall back to default link URL when choice has no link", async () => {
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "q:auto_789:0:media_101",
+      })
+    );
+
+    const call = mockSendDirectMessageWithLinkButton.mock.calls[0];
+    const url = call[4][0].url;
+    expect(url).toContain("dishco.onelink.me");
+  });
+
+  it("should send reply without button when no link is configured", async () => {
+    const automationWithoutLink = {
+      ...questionFirstAutomation,
+      questionChoices: {
+        choices: [
+          {
+            label: "No link",
+            replyText: "just a text reply",
+          },
+        ],
+      },
+    };
+    mockPrisma.automation.findFirst.mockResolvedValue(automationWithoutLink);
+
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "q:auto_789:0:media_101",
+      })
+    );
+
+    expect(mockSendDirectMessage).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "commenter_999",
+      "just a text reply"
+    );
+    expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
+  });
+
+  it("should remain backward compatible with single-button opening DM", async () => {
+    const singleButtonAutomation = {
+      ...mockAutomation,
+      openingDmEnabled: true,
+      openingDmMessage: "Hey {username}, click below",
+      openingDmButtonLabel: "Get link",
+      questionChoices: null,
+    };
+    mockPrisma.automation.findMany.mockResolvedValue([singleButtonAutomation]);
+
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "comment_555",
+      "Hey commenter_user, click below",
+      "Get link",
+      "reveal:auto_789"
+    );
+    expect(mockSendPrivateReplyWithMultipleButtons).not.toHaveBeenCalled();
+  });
+
+  it("should ignore questionChoices with fewer than 2 choices", async () => {
+    const invalidChoicesAutomation = {
+      ...mockAutomation,
+      openingDmEnabled: true,
+      openingDmMessage: "Hey {username}",
+      openingDmButtonLabel: "Click",
+      questionChoices: {
+        choices: [{ label: "Only one", replyText: "oops" }],
+      },
+    };
+    mockPrisma.automation.findMany.mockResolvedValue([invalidChoicesAutomation]);
+
+    const processor = getProcessor();
+    await processor(createMockJob());
+
+    // Should fall back to single-button opening DM
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalled();
+    expect(mockSendPrivateReplyWithMultipleButtons).not.toHaveBeenCalled();
   });
 });
