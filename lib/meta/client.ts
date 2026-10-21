@@ -695,6 +695,22 @@ export async function getMediaInsights(
   return result;
 }
 
+/**
+ * Fetch a single media's details, including its permalink.
+ * Used to extract the post shortcode for attribution.
+ */
+export async function getMediaDetails(
+  accessToken: string,
+  mediaId: string
+): Promise<InstagramMedia> {
+  const url = new URL(`${instagramGraphBase()}/${mediaId}`);
+  url.searchParams.set("fields", "id,permalink");
+  url.searchParams.set("access_token", accessToken);
+
+  const response = await fetch(url.toString());
+  return handleResponse<InstagramMedia>(response);
+}
+
 /** One day of net follower change, as reported by account insights. */
 export interface FollowerCountPoint {
   /** ISO date (YYYY-MM-DD) the change is attributed to. */

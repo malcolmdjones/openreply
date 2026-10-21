@@ -10,6 +10,7 @@ const {
   mockSendDirectMessageWithButton,
   mockSendDirectMessage,
   mockSendDirectMessageWithLinkButton,
+  mockGetMediaDetails,
   mockDecryptToken,
   mockMatchKeywords,
   mockReserveDMSlot,
@@ -44,6 +45,7 @@ const {
   mockSendDirectMessageWithButton: vi.fn(),
   mockSendDirectMessage: vi.fn(),
   mockSendDirectMessageWithLinkButton: vi.fn(),
+  mockGetMediaDetails: vi.fn(),
   mockDecryptToken: vi.fn(),
   mockMatchKeywords: vi.fn(),
   mockReserveDMSlot: vi.fn(),
@@ -65,6 +67,7 @@ vi.mock("@/lib/meta/client", () => ({
   sendDirectMessageWithButton: mockSendDirectMessageWithButton,
   sendDirectMessage: mockSendDirectMessage,
   sendDirectMessageWithLinkButton: mockSendDirectMessageWithLinkButton,
+  getMediaDetails: mockGetMediaDetails,
   sendCommentReply: vi.fn(),
   MetaApiError: class MetaApiError extends Error {
     code: number;
@@ -224,7 +227,9 @@ beforeEach(() => {
   // duplicate of an already-answered one.
   mockPrisma.dmLog.findFirst.mockImplementation(
     async (args: { where?: { status?: string } } = {}) =>
-      args.where?.status === "SENT" ? null : { commenterName: "commenter_user" }
+      args.where?.status === "SENT" 
+        ? null 
+        : { commenterName: "commenter_user" }
   );
   mockPrisma.dmLog.upsert.mockResolvedValue({});
   mockPrisma.dmLog.update.mockResolvedValue({});
@@ -1155,6 +1160,10 @@ describe("DM Worker — question-first flow", () => {
   beforeEach(() => {
     mockPrisma.automation.findMany.mockResolvedValue([questionFirstAutomation]);
     mockPrisma.automation.findFirst.mockResolvedValue(questionFirstAutomation);
+    mockGetMediaDetails.mockResolvedValue({
+      id: "media_101",
+      permalink: "https://www.instagram.com/p/ABC123/",
+    });
   });
 
   it("should send opening DM with multiple postback buttons (2-3 choices)", async () => {
@@ -1212,8 +1221,31 @@ describe("DM Worker — question-first flow", () => {
     expect(url).toContain("af_sub4=ABC123");
     // Verify existing params preserved
     expect(url).toContain("pid=instagram_dm");
-    expect(url).toContain("c=ig_comment_food");
+    // Verify c param uses first configured keyword (LINK -> "link") + shortcode
+    expect(url).toContain("c=ig_link_ABC123");
     expect(url).toContain("af_channel=comment_to_dm");
+  });
+
+  it("should use first keyword consistently across variants", async () => {
+    const automationWithVariants = {
+      ...questionFirstAutomation,
+      keywords: ["YUM", "YUMM", "YUMMM", "YUMMY"], // Variants all use first
+    };
+    mockPrisma.automation.findFirst.mockResolvedValue(automationWithVariants);
+
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "q:auto_789:1:media_101",
+      })
+    );
+
+    const call = mockSendDirectMessageWithLinkButton.mock.calls[0];
+    const url = call[4][0].url;
+    // Should use "yum" (first keyword) regardless of which variant was matched
+    expect(url).toContain("c=ig_yum_ABC123");
   });
 
   it("should handle postback idempotently (same choice tap = one reply)", async () => {
@@ -1230,6 +1262,51 @@ describe("DM Worker — question-first flow", () => {
 
     expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
     expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+  });
+
+  it("should fall back to configured c param when shortcode cannot be determined", async () => {
+    // Mock getMediaDetails to fail (simulating an API error)
+    mockGetMediaDetails.mockRejectedValue(new Error("Media not found"));
+
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "q:auto_789:1:media_999", // Use a different media ID to avoid cache
+      })
+    );
+
+    const call = mockSendDirectMessageWithLinkButton.mock.calls[0];
+    const url = call[4][0].url;
+    // Should keep the configured c param
+    expect(url).toContain("c=ig_comment_food");
+    // Should not have af_sub4 since there's no shortcode
+    expect(url).not.toContain("af_sub4");
+  });
+
+  it("should fall back to configured c param when automation has no keywords", async () => {
+    const automationWithoutKeywords = {
+      ...questionFirstAutomation,
+      keywords: [], // No keywords configured
+    };
+    mockPrisma.automation.findFirst.mockResolvedValue(automationWithoutKeywords);
+
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "q:auto_789:1:media_101",
+      })
+    );
+
+    const call = mockSendDirectMessageWithLinkButton.mock.calls[0];
+    const url = call[4][0].url;
+    // Should keep the configured c param
+    expect(url).toContain("c=ig_comment_food");
+    // Should still have af_sub4 since shortcode is available
+    expect(url).toContain("af_sub4=ABC123");
   });
 
   it("should use per-choice link URL when configured", async () => {

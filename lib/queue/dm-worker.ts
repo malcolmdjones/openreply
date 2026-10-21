@@ -16,6 +16,7 @@ import {
   MetaApiError,
   RateLimitError,
   TokenExpiredError,
+  getMediaDetails,
   getUserFollowStatus,
   sendCommentReply,
   sendDirectMessage,
@@ -29,6 +30,7 @@ import {
 } from "@/lib/meta/client";
 import { decryptToken } from "@/lib/meta/oauth";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
+import { instagramShortcode } from "@/lib/utils/csv";
 import { reserveDMSlot } from "@/lib/utils/rate-limiter";
 import {
   releaseWorkspaceDMReservation,
@@ -52,6 +54,44 @@ interface QuestionChoice {
 }
 
 const BACKOFF_DELAYS = [5 * 60 * 1000, 15 * 60 * 1000, 45 * 60 * 1000];
+
+/**
+ * In-memory cache for media shortcodes. Maps mediaId -> shortcode.
+ * Shortcodes are immutable once a post is created, so this cache
+ * never needs invalidation.
+ */
+const shortcodeCache = new Map<string, string>();
+
+/**
+ * Fetch the shortcode for a media ID, with caching.
+ * Extracts the shortcode from the media's permalink (e.g. "ABC123" from "instagram.com/p/ABC123/").
+ * Returns null if the shortcode cannot be determined.
+ */
+async function getMediaShortcode(
+  accessToken: string,
+  mediaId: string
+): Promise<string | null> {
+  const cached = shortcodeCache.get(mediaId);
+  if (cached) return cached;
+
+  try {
+    const media = await getMediaDetails(accessToken, mediaId);
+    if (media.permalink) {
+      const shortcode = instagramShortcode(media.permalink);
+      if (shortcode) {
+        shortcodeCache.set(mediaId, shortcode);
+        return shortcode;
+      }
+    }
+  } catch (error) {
+    console.log(
+      `[DM Worker] Failed to fetch shortcode for media ${mediaId}:`,
+      formatError(error)
+    );
+  }
+
+  return null;
+}
 
 function formatError(error: unknown): string {
   if (error instanceof MetaApiError) {
@@ -90,28 +130,35 @@ type WorkerTrackedLink = {
 
 /**
  * Build an attributed URL for AppsFlyer OneLink tracking.
- * Appends af_sub1 (mediaId), af_sub2 (choice label slug), af_sub3 (automation id),
- * and af_sub4 (post shortcode if available) query params, preserving any existing
- * query parameters.
+ * Sets the c param to ig_<keyword>_<shortcode> for PostHog attribution,
+ * and appends af_sub1-4 for internal tracking.
  */
 function buildAttributedUrl(
   baseUrl: string,
   mediaId: string,
   choiceLabel: string,
   automationId: string,
-  postUrl?: string | null
+  postShortcode: string | null,
+  firstKeyword: string | null
 ): string {
   const url = new URL(baseUrl);
+  
+  // Set c param for PostHog: ig_<keyword>_<shortcode>
+  // Use the first configured keyword (lowercased, stripped to [a-z0-9]) for consistency
+  // across variants (YUM, YUMM, YUMMM -> ig_yum_<shortcode>)
+  if (firstKeyword && postShortcode) {
+    const keywordSlug = firstKeyword.toLowerCase().replace(/[^a-z0-9]/g, "");
+    url.searchParams.set("c", `ig_${keywordSlug}_${postShortcode}`);
+  }
+  // If we can't determine the shortcode, keep the existing c param (don't remove it)
+  
+  // Keep af_sub1-4 for internal tracking (not used in PostHog)
   url.searchParams.set("af_sub1", mediaId);
   url.searchParams.set("af_sub2", choiceLabel.toLowerCase().replace(/\s+/g, "-"));
   url.searchParams.set("af_sub3", automationId);
   
-  // Extract post shortcode from permalink if available (e.g. instagram.com/p/ABC123/)
-  if (postUrl) {
-    const match = postUrl.match(/\/p\/([^/]+)/);
-    if (match) {
-      url.searchParams.set("af_sub4", match[1]);
-    }
+  if (postShortcode) {
+    url.searchParams.set("af_sub4", postShortcode);
   }
   
   return url.toString();
@@ -872,13 +919,20 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
       });
       const linkUrl = choice.linkUrl || questionChoicesRaw?.defaultLinkUrl;
       if (linkUrl && mediaId) {
+        // Fetch the post shortcode for attribution (cached after first fetch).
+        const postShortcode = await getMediaShortcode(accessToken, mediaId);
+        
+        // Use the first configured keyword for consistent attribution across variants
+        const firstKeyword = automation.keywords[0] ?? null;
+        
         // Send reply text + web_url button with AppsFlyer attribution.
         const attributedUrl = buildAttributedUrl(
           linkUrl,
           mediaId,
           choice.label,
           automation.id,
-          automation.postUrl
+          postShortcode,
+          firstKeyword
         );
         await sendDirectMessageWithLinkButton(
           accessToken,
