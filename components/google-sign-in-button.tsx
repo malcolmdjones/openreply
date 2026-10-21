@@ -26,6 +26,8 @@ export default function GoogleSignInButton({
         provider: "google",
         options: {
           redirectTo: redirectTo.toString(),
+          // Explicitly use PKCE flow for better security and Brave compatibility
+          skipBrowserRedirect: false,
           queryParams: {
             access_type: "offline",
             prompt: "select_account",
