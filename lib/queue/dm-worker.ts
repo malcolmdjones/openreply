@@ -139,16 +139,18 @@ function buildAttributedUrl(
   choiceLabel: string,
   automationId: string,
   postShortcode: string | null,
-  matchedKeyword: string | null
+  firstKeyword: string | null
 ): string {
   const url = new URL(baseUrl);
   
-  // Set c param for PostHog: ig_<keyword>_<shortcode>, or fall back to existing c
-  if (matchedKeyword && postShortcode) {
-    const keywordSlug = matchedKeyword.toLowerCase().replace(/\s+/g, "-");
+  // Set c param for PostHog: ig_<keyword>_<shortcode>
+  // Use the first configured keyword (lowercased, stripped to [a-z0-9]) for consistency
+  // across variants (YUM, YUMM, YUMMM -> ig_yum_<shortcode>)
+  if (firstKeyword && postShortcode) {
+    const keywordSlug = firstKeyword.toLowerCase().replace(/[^a-z0-9]/g, "");
     url.searchParams.set("c", `ig_${keywordSlug}_${postShortcode}`);
   }
-  // If we can't determine the shortcode or keyword, keep the existing c param (don't remove it)
+  // If we can't determine the shortcode, keep the existing c param (don't remove it)
   
   // Keep af_sub1-4 for internal tracking (not used in PostHog)
   url.searchParams.set("af_sub1", mediaId);
@@ -879,13 +881,11 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
     if (existingReply?.status === "SENT") return;
 
     // Personalize {username} from the opening DM log for this user, if present.
-    // Also get matchedKeyword for attribution.
     const openingLog = await prisma.dmLog.findFirst({
       where: { automationId: automation.id, commenterId: userId },
-      select: { commenterName: true, matchedKeyword: true },
+      select: { commenterName: true },
     });
     const commenterName = openingLog?.commenterName ?? null;
-    const matchedKeyword = openingLog?.matchedKeyword ?? null;
 
     const usage = await reserveWorkspaceDMSend(automation.workspaceId);
     if (!usage.allowed) {
@@ -922,6 +922,9 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
         // Fetch the post shortcode for attribution (cached after first fetch).
         const postShortcode = await getMediaShortcode(accessToken, mediaId);
         
+        // Use the first configured keyword for consistent attribution across variants
+        const firstKeyword = automation.keywords[0] ?? null;
+        
         // Send reply text + web_url button with AppsFlyer attribution.
         const attributedUrl = buildAttributedUrl(
           linkUrl,
@@ -929,7 +932,7 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
           choice.label,
           automation.id,
           postShortcode,
-          matchedKeyword
+          firstKeyword
         );
         await sendDirectMessageWithLinkButton(
           accessToken,

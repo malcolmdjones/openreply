@@ -229,7 +229,7 @@ beforeEach(() => {
     async (args: { where?: { status?: string } } = {}) =>
       args.where?.status === "SENT" 
         ? null 
-        : { commenterName: "commenter_user", matchedKeyword: "LINK" }
+        : { commenterName: "commenter_user" }
   );
   mockPrisma.dmLog.upsert.mockResolvedValue({});
   mockPrisma.dmLog.update.mockResolvedValue({});
@@ -1221,9 +1221,31 @@ describe("DM Worker — question-first flow", () => {
     expect(url).toContain("af_sub4=ABC123");
     // Verify existing params preserved
     expect(url).toContain("pid=instagram_dm");
-    // Verify c param is replaced with per-post attribution
+    // Verify c param uses first configured keyword (LINK -> "link") + shortcode
     expect(url).toContain("c=ig_link_ABC123");
     expect(url).toContain("af_channel=comment_to_dm");
+  });
+
+  it("should use first keyword consistently across variants", async () => {
+    const automationWithVariants = {
+      ...questionFirstAutomation,
+      keywords: ["YUM", "YUMM", "YUMMM", "YUMMY"], // Variants all use first
+    };
+    mockPrisma.automation.findFirst.mockResolvedValue(automationWithVariants);
+
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "q:auto_789:1:media_101",
+      })
+    );
+
+    const call = mockSendDirectMessageWithLinkButton.mock.calls[0];
+    const url = call[4][0].url;
+    // Should use "yum" (first keyword) regardless of which variant was matched
+    expect(url).toContain("c=ig_yum_ABC123");
   });
 
   it("should handle postback idempotently (same choice tap = one reply)", async () => {
@@ -1263,11 +1285,12 @@ describe("DM Worker — question-first flow", () => {
     expect(url).not.toContain("af_sub4");
   });
 
-  it("should fall back to configured c param when matchedKeyword is null", async () => {
-    mockPrisma.dmLog.findFirst.mockResolvedValue({
-      commenterName: "commenter_user",
-      matchedKeyword: null, // No keyword matched (e.g., matchAnyWord campaign)
-    });
+  it("should fall back to configured c param when automation has no keywords", async () => {
+    const automationWithoutKeywords = {
+      ...questionFirstAutomation,
+      keywords: [], // No keywords configured
+    };
+    mockPrisma.automation.findFirst.mockResolvedValue(automationWithoutKeywords);
 
     const processor = getProcessor();
     await processor(
